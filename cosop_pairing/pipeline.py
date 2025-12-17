@@ -17,6 +17,12 @@ class PipelineConfig:
     root: Path
     output_dir: Path
     model: str = "gpt-4o-mini"
+    # For private OpenAI-compatible endpoints (settable via OPENAI_BASE_URL).
+    base_url: str | None = None
+    # For Azure OpenAI (settable via AZURE_OPENAI_* env vars).
+    use_azure: bool | None = None
+    azure_endpoint: str | None = None
+    azure_api_version: str | None = None
     paragraph_window: int = 5
     max_sentences_per_call: int = 40
 
@@ -86,7 +92,15 @@ def process_doc_pair(pair: DocPair, *, cfg: PipelineConfig) -> SentencePairs:
         en_sents = en_sents[: cfg.max_sentences_per_call]
         es_sents = es_sents[: cfg.max_sentences_per_call]
 
-        aligned = pair_sentences_structured(en_sentences=en_sents, es_sentences=es_sents, model=cfg.model)
+        aligned = pair_sentences_structured(
+            en_sentences=en_sents,
+            es_sentences=es_sents,
+            model=cfg.model,
+            base_url=cfg.base_url,
+            use_azure=cfg.use_azure,
+            azure_endpoint=cfg.azure_endpoint,
+            azure_api_version=cfg.azure_api_version,
+        )
         all_pairs.extend(aligned.sentence_pairs)
 
     return SentencePairs(sentence_pairs=all_pairs)

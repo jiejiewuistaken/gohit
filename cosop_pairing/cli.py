@@ -24,7 +24,30 @@ def main() -> None:
         "--model",
         type=str,
         default="gpt-4o-mini",
-        help="OpenAI model to use for structured pairing.",
+        help="Model (OpenAI) or deployment name (Azure OpenAI) for structured pairing.",
+    )
+    parser.add_argument(
+        "--base-url",
+        type=str,
+        default=None,
+        help="Optional OpenAI-compatible base URL (e.g. private endpoint). Also supports env OPENAI_BASE_URL.",
+    )
+    parser.add_argument(
+        "--azure-endpoint",
+        type=str,
+        default=None,
+        help="Azure OpenAI endpoint URL. Also supports env AZURE_OPENAI_ENDPOINT.",
+    )
+    parser.add_argument(
+        "--azure-api-version",
+        type=str,
+        default=None,
+        help="Azure OpenAI API version. Also supports env AZURE_OPENAI_API_VERSION.",
+    )
+    parser.add_argument(
+        "--use-azure",
+        action="store_true",
+        help="Force Azure OpenAI mode (otherwise auto-detected from env AZURE_OPENAI_*).",
     )
     parser.add_argument(
         "--paragraph-window",
@@ -45,6 +68,10 @@ def main() -> None:
         root=args.root,
         output_dir=args.output_dir,
         model=args.model,
+        base_url=args.base_url,
+        use_azure=True if args.use_azure else None,
+        azure_endpoint=args.azure_endpoint,
+        azure_api_version=args.azure_api_version,
         paragraph_window=args.paragraph_window,
         max_sentences_per_call=args.max_sentences_per_call,
     )
