@@ -148,6 +148,25 @@ def main() -> None:
     parser.add_argument("--data", required=True, help="Path to JSON file: {'sentence_pairs':[...]} (your format)")
     parser.add_argument("--output-dir", required=True, help="Output directory for adapters / checkpoints")
 
+    # Hub / offline / cache
+    parser.add_argument("--cache-dir", default=None, help="HF cache dir (optional)")
+    parser.add_argument("--revision", default=None, help="Model revision (branch/tag/commit) if using Hub")
+    parser.add_argument(
+        "--hf-endpoint",
+        default=None,
+        help="Override HuggingFace Hub endpoint (e.g. internal mirror). Sets env HF_ENDPOINT.",
+    )
+    parser.add_argument(
+        "--local-files-only",
+        action="store_true",
+        help="Do not try to reach the internet; load only from local cache / local path.",
+    )
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Pass trust_remote_code=True to from_pretrained (only if you trust the source).",
+    )
+
     parser.add_argument("--method", choices=["lora", "qlora", "ia3"], default="lora", help="PEFT method")
     parser.add_argument("--target-modules", default=None, help="Comma-separated target module names (override defaults)")
 
@@ -180,13 +199,26 @@ def main() -> None:
     args = parser.parse_args()
 
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    if args.hf_endpoint:
+        os.environ["HF_ENDPOINT"] = args.hf_endpoint
+    if args.local_files_only:
+        # Make Transformers/huggingface_hub behave offline.
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
     examples = _read_sentence_pairs_json(args.data)
     if not examples:
         raise RuntimeError(f"No examples found in {args.data}")
     ds = _build_dataset(examples)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model,
+        use_fast=True,
+        cache_dir=args.cache_dir,
+        revision=args.revision,
+        local_files_only=args.local_files_only,
+        trust_remote_code=args.trust_remote_code,
+    )
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -217,6 +249,10 @@ def main() -> None:
         args.model,
         torch_dtype=torch.bfloat16 if args.bf16 else (torch.float16 if args.fp16 else None),
         low_cpu_mem_usage=True,
+        cache_dir=args.cache_dir,
+        revision=args.revision,
+        local_files_only=args.local_files_only,
+        trust_remote_code=args.trust_remote_code,
         **model_kwargs,
     )
 
