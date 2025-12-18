@@ -157,6 +157,12 @@ def main() -> None:
         help="HuggingFace token. If not set, reads env HF_TOKEN or HUGGINGFACE_HUB_TOKEN.",
     )
     parser.add_argument(
+        "--use-fast",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Whether to use fast tokenizer (default: false).",
+    )
+    parser.add_argument(
         "--hf-endpoint",
         default=None,
         help="Override HuggingFace Hub endpoint (e.g. internal mirror). Sets env HF_ENDPOINT.",
@@ -222,7 +228,7 @@ def main() -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(
         args.model,
-        use_fast=True,
+        use_fast=bool(args.use_fast),
         cache_dir=args.cache_dir,
         revision=args.revision,
         local_files_only=args.local_files_only,
