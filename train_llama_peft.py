@@ -152,6 +152,11 @@ def main() -> None:
     parser.add_argument("--cache-dir", default=None, help="HF cache dir (optional)")
     parser.add_argument("--revision", default=None, help="Model revision (branch/tag/commit) if using Hub")
     parser.add_argument(
+        "--hf-token",
+        default=None,
+        help="HuggingFace token. If not set, reads env HF_TOKEN or HUGGINGFACE_HUB_TOKEN.",
+    )
+    parser.add_argument(
         "--hf-endpoint",
         default=None,
         help="Override HuggingFace Hub endpoint (e.g. internal mirror). Sets env HF_ENDPOINT.",
@@ -206,6 +211,10 @@ def main() -> None:
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
+    hf_token = args.hf_token
+    if hf_token is None:
+        hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN") or None
+
     examples = _read_sentence_pairs_json(args.data)
     if not examples:
         raise RuntimeError(f"No examples found in {args.data}")
@@ -218,6 +227,7 @@ def main() -> None:
         revision=args.revision,
         local_files_only=args.local_files_only,
         trust_remote_code=args.trust_remote_code,
+        token=hf_token,
     )
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -253,6 +263,7 @@ def main() -> None:
         revision=args.revision,
         local_files_only=args.local_files_only,
         trust_remote_code=args.trust_remote_code,
+        token=hf_token,
         **model_kwargs,
     )
 
