@@ -221,20 +221,47 @@ def main() -> None:
     if hf_token is None:
         hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN") or None
 
+    # ---- Preflight info (helps debug offline/mirror issues) ----
+    resolved_endpoint = os.getenv("HF_ENDPOINT") or "https://huggingface.co"
+    model_path = args.model
+    is_local_dir = os.path.isdir(model_path)
+    print(
+        "[preflight] "
+        f"local_files_only={args.local_files_only} "
+        f"HF_ENDPOINT={resolved_endpoint} "
+        f"model_is_local_dir={is_local_dir}"
+    )
+    if not is_local_dir and resolved_endpoint == "https://huggingface.co":
+        print(
+            "[preflight] WARNING: model is a Hub id and HF_ENDPOINT is default. "
+            "If you cannot access huggingface.co, set --hf-endpoint to your mirror, "
+            "or use a local model directory with --local-files-only."
+        )
+
     examples = _read_sentence_pairs_json(args.data)
     if not examples:
         raise RuntimeError(f"No examples found in {args.data}")
     ds = _build_dataset(examples)
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model,
-        use_fast=bool(args.use_fast),
-        cache_dir=args.cache_dir,
-        revision=args.revision,
-        local_files_only=args.local_files_only,
-        trust_remote_code=args.trust_remote_code,
-        token=hf_token,
-    )
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model,
+            use_fast=bool(args.use_fast),
+            cache_dir=args.cache_dir,
+            revision=args.revision,
+            local_files_only=args.local_files_only,
+            trust_remote_code=args.trust_remote_code,
+            token=hf_token,
+        )
+    except OSError as e:
+        raise OSError(
+            str(e)
+            + "\n\n"
+            + "Fix options:\n"
+            + "- Use an internal HF mirror: pass --hf-endpoint https://YOUR_MIRROR (or set env HF_ENDPOINT)\n"
+            + "- Or download/copy the model locally and pass --model /path/to/local/model --local-files-only\n"
+            + "- If your network requires a proxy, set HTTPS_PROXY/HTTP_PROXY accordingly\n"
+        ) from e
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -261,17 +288,27 @@ def main() -> None:
         model_kwargs["quantization_config"] = quant_config
         model_kwargs["device_map"] = "auto"
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        torch_dtype=torch.bfloat16 if args.bf16 else (torch.float16 if args.fp16 else None),
-        low_cpu_mem_usage=True,
-        cache_dir=args.cache_dir,
-        revision=args.revision,
-        local_files_only=args.local_files_only,
-        trust_remote_code=args.trust_remote_code,
-        token=hf_token,
-        **model_kwargs,
-    )
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model,
+            torch_dtype=torch.bfloat16 if args.bf16 else (torch.float16 if args.fp16 else None),
+            low_cpu_mem_usage=True,
+            cache_dir=args.cache_dir,
+            revision=args.revision,
+            local_files_only=args.local_files_only,
+            trust_remote_code=args.trust_remote_code,
+            token=hf_token,
+            **model_kwargs,
+        )
+    except OSError as e:
+        raise OSError(
+            str(e)
+            + "\n\n"
+            + "Fix options:\n"
+            + "- Use an internal HF mirror: pass --hf-endpoint https://YOUR_MIRROR (or set env HF_ENDPOINT)\n"
+            + "- Or download/copy the model locally and pass --model /path/to/local/model --local-files-only\n"
+            + "- If your network requires a proxy, set HTTPS_PROXY/HTTP_PROXY accordingly\n"
+        ) from e
 
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
