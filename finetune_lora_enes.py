@@ -116,8 +116,17 @@ def main() -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     set_seed(SEED)
 
+    hf_token = os.environ.get("HF_TOKEN")
+
     # 直接从 Hub 加载数据
-    ds_dict = load_dataset(DATASET_ID)
+    # 常见报错原因：
+    # - 数据集是 private / gated：需要 HF_TOKEN 才能访问
+    # - 数据集包含自定义加载脚本：需要 trust_remote_code=True
+    ds_dict = load_dataset(
+        DATASET_ID,
+        token=hf_token,
+        trust_remote_code=True,
+    )
     if "train" in ds_dict:
         dataset = ds_dict["train"]
     else:
@@ -134,8 +143,6 @@ def main() -> None:
         raise ValueError(
             f"Dataset {DATASET_ID} must contain columns ['en', 'es'], got: {dataset.column_names}"
         )
-
-    hf_token = os.environ.get("HF_TOKEN")
 
     tokenizer = AutoTokenizer.from_pretrained(
         MODEL_NAME,
