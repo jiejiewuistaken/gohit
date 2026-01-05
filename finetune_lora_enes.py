@@ -15,6 +15,7 @@ import os
 from typing import Any
 
 from datasets import load_dataset
+from huggingface_hub import HfFolder, login
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
@@ -116,7 +117,24 @@ def main() -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     set_seed(SEED)
 
-    hf_token = os.environ.get("HF_TOKEN")
+    # Token resolution:
+    # - Prefer explicit env vars (common in jobs/CI)
+    # - Fallback to locally cached token (huggingface-cli login)
+    hf_token = (
+        os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+        or os.environ.get("HF_ACCESS_TOKEN")
+        or HfFolder.get_token()
+    )
+    if not hf_token:
+        raise RuntimeError(
+            "No Hugging Face token found. Set HF_TOKEN (or HUGGINGFACE_HUB_TOKEN) "
+            "to a token that has access to the gated model and dataset."
+        )
+
+    # Ensure hub auth is available globally as well.
+    # This helps for any internal hub calls that don't pass `token=...` through.
+    login(token=hf_token, add_to_git_credential=False)
 
     # 直接从 Hub 加载数据
     # 常见报错原因：
