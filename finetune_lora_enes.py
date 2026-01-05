@@ -4,6 +4,7 @@
 #   "torch>=2.1",
 #   "transformers>=4.40",
 #   "datasets",
+#   "huggingface_hub",
 #   "peft",
 #   "accelerate",
 #   "sentencepiece",
@@ -123,13 +124,17 @@ def main() -> None:
     hf_token = (
         os.environ.get("HF_TOKEN")
         or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+        or os.environ.get("HUGGINGFACE_TOKEN")
+        or os.environ.get("HF_API_TOKEN")
+        or os.environ.get("HUGGINGFACE_API_TOKEN")
         or os.environ.get("HF_ACCESS_TOKEN")
         or HfFolder.get_token()
     )
     if not hf_token:
         raise RuntimeError(
-            "No Hugging Face token found. Set HF_TOKEN (or HUGGINGFACE_HUB_TOKEN) "
-            "to a token that has access to the gated model and dataset."
+            "No Hugging Face token found. Set HF_TOKEN (recommended) or one of: "
+            "HUGGINGFACE_HUB_TOKEN, HUGGINGFACE_TOKEN. The token must have access "
+            "to the gated model and the dataset."
         )
 
     # Ensure hub auth is available globally as well.
