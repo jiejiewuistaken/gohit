@@ -221,6 +221,9 @@ def main() -> None:
         optim="adamw_torch",
         fp16=False,
         bf16=False,
+        push_to_hub=True,
+        hub_model_id=HUB_REPO_ID,
+        hub_token=hf_token,
     )
 
     trainer = Trainer(
@@ -238,7 +241,7 @@ def main() -> None:
     tokenizer.save_pretrained(OUTPUT_DIR)
 
     # 推送到 Hugging Face Hub
-    trainer.push_to_hub(repo_id=HUB_REPO_ID)
+    trainer.push_to_hub()
 
 
 if __name__ == "__main__":
