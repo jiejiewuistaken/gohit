@@ -178,6 +178,9 @@ class HuggingFaceHubTranslationConnector:
         batch_size: int = 8,
         prompt_template: Optional[str] = None,
         use_chat_template: bool = False,
+        trust_remote_code: bool = False,
+        base_model_id: Optional[str] = None,
+        is_peft_adapter: bool = False,
     ) -> None:
         try:
             import torch  # type: ignore
@@ -196,18 +199,64 @@ class HuggingFaceHubTranslationConnector:
         self.batch_size = batch_size
         self.prompt_template = prompt_template
         self.use_chat_template = use_chat_template
+        self.trust_remote_code = trust_remote_code
+        self.base_model_id = base_model_id
+        self.is_peft_adapter = is_peft_adapter
 
-        config = AutoConfig.from_pretrained(model_id)
-        self._tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+        # Some repos (often PEFT adapters) do not ship a usable config/tokenizer.
+        # We support falling back to a base model's config/tokenizer when provided.
+        config = None
+        try:
+            config = AutoConfig.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+        except ValueError:
+            if base_model_id is None:
+                raise
+        except OSError:
+            if base_model_id is None:
+                raise
+
+        # Tokenizer: try model_id first; if missing, fall back to base_model_id.
+        try:
+            self._tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True, trust_remote_code=trust_remote_code)
+        except Exception:
+            if base_model_id is None:
+                raise
+            self._tokenizer = AutoTokenizer.from_pretrained(base_model_id, use_fast=True, trust_remote_code=trust_remote_code)
+
+        if config is None and base_model_id is not None:
+            config = AutoConfig.from_pretrained(base_model_id, trust_remote_code=trust_remote_code)
 
         # Decide model family (Seq2Seq vs CausalLM)
         is_seq2seq = bool(getattr(config, "is_encoder_decoder", False))
         if is_seq2seq:
-            model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
+            # If weights repo is missing config, config comes from base_model_id above.
+            model = AutoModelForSeq2SeqLM.from_pretrained(
+                model_id,
+                config=config,
+                trust_remote_code=trust_remote_code,
+            )
             task = "text2text-generation"
             self._mode = "seq2seq"
         else:
-            model = AutoModelForCausalLM.from_pretrained(model_id)
+            if is_peft_adapter:
+                if base_model_id is None:
+                    ERR("PEFT adapter loading requires --base_model_id")
+                try:
+                    from peft import PeftModel  # type: ignore
+                except Exception as e:
+                    ERR(f"PEFT adapter loading requires 'peft'. Install requirements.txt. Original error: {e}")
+                base_model = AutoModelForCausalLM.from_pretrained(
+                    base_model_id,
+                    trust_remote_code=trust_remote_code,
+                )
+                model = PeftModel.from_pretrained(base_model, model_id)
+            else:
+                # If weights repo is missing config, config comes from base_model_id above.
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_id,
+                    config=config,
+                    trust_remote_code=trust_remote_code,
+                )
             task = "text-generation"
             self._mode = "causal"
 
@@ -510,6 +559,24 @@ def main() -> None:
         default=False,
         help="For chat models with tokenizer.chat_template: build prompt via apply_chat_template",
     )
+    parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        default=False,
+        help="Enable transformers trust_remote_code for custom models",
+    )
+    parser.add_argument(
+        "--base_model_id",
+        type=str,
+        default=None,
+        help="Fallback base model id (needed if your repo is a PEFT adapter or missing config/tokenizer)",
+    )
+    parser.add_argument(
+        "--is_peft_adapter",
+        action="store_true",
+        default=False,
+        help="Treat --model_id as a PEFT adapter and load it on top of --base_model_id",
+    )
 
     parser.add_argument("--write_sample_data", action="store_true", default=False)
     args = parser.parse_args()
@@ -529,6 +596,9 @@ def main() -> None:
         batch_size=args.batch_size,
         prompt_template=args.prompt_template,
         use_chat_template=args.use_chat_template,
+        trust_remote_code=args.trust_remote_code,
+        base_model_id=args.base_model_id,
+        is_peft_adapter=args.is_peft_adapter,
     )
     config = LanguageTranslationServiceConfig(args=args, connector=connector)
 

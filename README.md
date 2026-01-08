@@ -54,5 +54,8 @@ python3 language_translation_testplan.py \
 - 如果你的模型是 **LLaMA / Qwen / 其它 CausalLM 或 chat 模型**，脚本会自动切到 `text-generation`，并用一个翻译 prompt 来生成结果。
   - 需要按 chat 模板喂模型时，加 `--use_chat_template`
   - 需要自定义提示词时，加 `--prompt_template`（必须包含 `{source_lang}` `{target_lang}` `{text}`）
+- 如果你遇到类似 **“Should have a model_type key in its config.json”** 的报错，通常说明你的仓库是 **PEFT/LoRA adapter** 或者漏传了 `config.json/tokenizer`。此时用下面两种方式之一：
+  - **PEFT adapter**：加 `--base_model_id <BASE>` 和 `--is_peft_adapter`
+  - **只有权重但缺 config/tokenizer**：至少加 `--base_model_id <BASE>`（脚本会用 base 的 config/tokenizer 去加载）
 - `METEOR` 指标在某些环境里会依赖 NLTK 的额外语料（如 `wordnet`）；本脚本在缺少语料时会自动降级（不会让整个 test 失败）。
 
