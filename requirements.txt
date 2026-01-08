@@ -1,0 +1,8 @@
+pandas>=2.2.0
+transformers>=4.46.0
+torch>=2.2.0
+sacrebleu>=2.4.0
+rouge-score>=0.1.2
+nltk>=3.9.0
+sentencepiece>=0.2.0
+peft>=0.11.0

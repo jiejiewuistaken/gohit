@@ -1,0 +1,3 @@
+question_id,test_category,test_id,question,ground_truth_answer
+1,language_translation,tran_text_en2es,"Hello, how are you?","Hola, ¿cómo estás?"
+2,language_translation,tran_text_en2es,Please translate this sentence into Spanish.,"Por favor, traduce esta oración al español."
