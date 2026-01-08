@@ -51,6 +51,8 @@ python3 language_translation_testplan.py \
 ### 注意（针对自定义模型）
 
 - 这个 runner 默认用 `transformers` 的 `text2text-generation` pipeline 进行推理；这适用于大多数 Seq2Seq 翻译模型。
-- 如果你的模型需要语言标签（例如输入需要 `">>es<<"` 之类前缀），最简单的方法是把前缀直接写进 CSV 的 `question` 字段；或者你也可以在 `HuggingFaceHubTranslationConnector.translate()` 里加 prefix。
+- 如果你的模型是 **LLaMA / Qwen / 其它 CausalLM 或 chat 模型**，脚本会自动切到 `text-generation`，并用一个翻译 prompt 来生成结果。
+  - 需要按 chat 模板喂模型时，加 `--use_chat_template`
+  - 需要自定义提示词时，加 `--prompt_template`（必须包含 `{source_lang}` `{target_lang}` `{text}`）
 - `METEOR` 指标在某些环境里会依赖 NLTK 的额外语料（如 `wordnet`）；本脚本在缺少语料时会自动降级（不会让整个 test 失败）。
 

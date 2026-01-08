@@ -164,11 +164,10 @@ class CompositeTextSimilarity:
 
 class HuggingFaceHubTranslationConnector:
     """
-    Simple HF Hub inference connector using transformers.
-    Works for:
-      - Seq2Seq translation models (AutoModelForSeq2SeqLM)
-      - Some instruction-tuned causal LMs if you set --task text-generation and provide a prompt template yourself
-    For en->es translation, Seq2Seq is the typical case.
+    HF Hub inference connector that supports:
+      - Seq2Seq translation models (AutoModelForSeq2SeqLM + text2text-generation)
+      - Causal LMs / chat LMs (e.g. LLaMA) (AutoModelForCausalLM + text-generation)
+    For CausalLM, we construct a translation prompt (optionally using chat_template).
     """
 
     def __init__(
@@ -177,10 +176,14 @@ class HuggingFaceHubTranslationConnector:
         device: str = "auto",
         max_new_tokens: int = 256,
         batch_size: int = 8,
+        prompt_template: Optional[str] = None,
+        use_chat_template: bool = False,
     ) -> None:
         try:
             import torch  # type: ignore
             from transformers import (  # type: ignore
+                AutoConfig,
+                AutoModelForCausalLM,
                 AutoModelForSeq2SeqLM,
                 AutoTokenizer,
                 pipeline,
@@ -191,36 +194,79 @@ class HuggingFaceHubTranslationConnector:
         self.model_id = model_id
         self.max_new_tokens = max_new_tokens
         self.batch_size = batch_size
+        self.prompt_template = prompt_template
+        self.use_chat_template = use_chat_template
 
-        tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
+        config = AutoConfig.from_pretrained(model_id)
+        self._tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+
+        # Decide model family (Seq2Seq vs CausalLM)
+        is_seq2seq = bool(getattr(config, "is_encoder_decoder", False))
+        if is_seq2seq:
+            model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
+            task = "text2text-generation"
+            self._mode = "seq2seq"
+        else:
+            model = AutoModelForCausalLM.from_pretrained(model_id)
+            task = "text-generation"
+            self._mode = "causal"
 
         if device == "auto":
             device_id = 0 if torch.cuda.is_available() else -1
         else:
             device_id = int(device)
 
-        # Use generic text2text-generation so custom translation heads still work.
-        self._pipe = pipeline(
-            "text2text-generation",
-            model=model,
-            tokenizer=tokenizer,
-            device=device_id,
-        )
+        # Pipeline for either mode.
+        self._pipe = pipeline(task, model=model, tokenizer=self._tokenizer, device=device_id)
 
     def translate(self, text: str, source_lang_id: str, target_lang_id: str) -> str:
-        # Minimal change: keep signature used by your testplan.
-        # Many translation models don't need explicit language tags; if yours does,
-        # encode them into the input in your dataset "question" or add your own prefix here.
-        out = self._pipe(
-            text,
-            max_new_tokens=self.max_new_tokens,
-            truncation=True,
+        # Keep signature used by your testplan.
+        if self._mode == "seq2seq":
+            out = self._pipe(text, max_new_tokens=self.max_new_tokens, truncation=True)
+            if not out:
+                return ""
+            return str(out[0].get("generated_text", "")).strip()
+
+        # CausalLM path (e.g. LLaMA): build a prompt.
+        source_lang = CODE2LANGUAGE.get(source_lang_id, source_lang_id)
+        target_lang = CODE2LANGUAGE.get(target_lang_id, target_lang_id)
+        prompt_template = self.prompt_template or (
+            "Translate the following text from {source_lang} to {target_lang}. "
+            "Return only the translation.\n\n"
+            "Text:\n{text}\n\n"
+            "Translation:"
         )
+
+        if self.use_chat_template and hasattr(self._tokenizer, "apply_chat_template") and getattr(self._tokenizer, "chat_template", None):
+            messages = [
+                {"role": "system", "content": "You are a professional translation system."},
+                {
+                    "role": "user",
+                    "content": prompt_template.format(source_lang=source_lang, target_lang=target_lang, text=text),
+                },
+            ]
+            prompt = self._tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            out = self._pipe(
+                prompt,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=False,
+                temperature=0.0,
+                return_full_text=False,
+            )
+        else:
+            prompt = prompt_template.format(source_lang=source_lang, target_lang=target_lang, text=text)
+            out = self._pipe(
+                prompt,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=False,
+                temperature=0.0,
+                return_full_text=False,
+            )
+
         if not out:
             return ""
-        # transformers returns list of dicts with "generated_text"
-        return str(out[0].get("generated_text", "")).strip()
+        generated = str(out[0].get("generated_text", "")).strip()
+        return generated
 
 
 # ----------------------------
@@ -452,6 +498,18 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="auto", help="auto | -1 (cpu) | 0 (cuda:0) ...")
     parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument(
+        "--prompt_template",
+        type=str,
+        default=None,
+        help="For CausalLM/chat models: python format string with {source_lang} {target_lang} {text}",
+    )
+    parser.add_argument(
+        "--use_chat_template",
+        action="store_true",
+        default=False,
+        help="For chat models with tokenizer.chat_template: build prompt via apply_chat_template",
+    )
 
     parser.add_argument("--write_sample_data", action="store_true", default=False)
     args = parser.parse_args()
@@ -469,6 +527,8 @@ def main() -> None:
         device=args.device,
         max_new_tokens=args.max_new_tokens,
         batch_size=args.batch_size,
+        prompt_template=args.prompt_template,
+        use_chat_template=args.use_chat_template,
     )
     config = LanguageTranslationServiceConfig(args=args, connector=connector)
 
