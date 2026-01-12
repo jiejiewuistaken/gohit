@@ -162,6 +162,24 @@ def _maybe_strip(text: str) -> str:
     return text.strip().strip('"').strip()
 
 
+def _first_generated_dict(x: Any) -> Dict[str, Any]:
+    """
+    Normalize pipeline outputs.
+
+    transformers pipelines may return:
+      - Dict (single output)
+      - List[Dict] (one input, multiple sequences)
+      - List[List[Dict]] (batch inputs, multiple sequences per input)
+    We always pick the first sequence for each input.
+    """
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, list) and x:
+        # Could be List[Dict] or nested List[List[Dict]]
+        return _first_generated_dict(x[0])
+    return {}
+
+
 class HuggingFaceHubTranslationConnector:
     """
     Hub inference connector that supports:
@@ -270,6 +288,13 @@ class HuggingFaceHubTranslationConnector:
             task = "text2text-generation"
             self._mode = "seq2seq"
         else:
+            # Decoder-only models should use left padding for correct generation.
+            # (Right-padding can distort attention and generation outputs.)
+            try:
+                self._tokenizer.padding_side = "left"
+            except Exception:
+                pass
+
             if is_peft_adapter:
                 if base_model_id is None:
                     ERR("PEFT adapter loading requires BASE_MODEL_ID.")
@@ -319,7 +344,8 @@ class HuggingFaceHubTranslationConnector:
             )
             preds: List[str] = []
             for o in outs:
-                preds.append(_maybe_strip(str(o.get("generated_text", ""))))
+                d = _first_generated_dict(o)
+                preds.append(_maybe_strip(str(d.get("generated_text", ""))))
             return preds
 
         source_lang = CODE2LANGUAGE.get(source_lang_id, source_lang_id)
@@ -360,15 +386,14 @@ class HuggingFaceHubTranslationConnector:
             prompts,
             max_new_tokens=self.max_new_tokens,
             do_sample=False,
-            temperature=0.0,
             return_full_text=False,
             batch_size=self.batch_size,
         )
 
         preds: List[str] = []
         for o in outs:
-            # text-generation pipeline returns list[dict], dict has 'generated_text'
-            preds.append(_maybe_strip(str(o.get("generated_text", ""))))
+            d = _first_generated_dict(o)
+            preds.append(_maybe_strip(str(d.get("generated_text", ""))))
         return preds
 
     def translate(self, text: str, source_lang_id: str, target_lang_id: str) -> str:
