@@ -297,8 +297,14 @@ class HuggingFaceHubTranslationConnector:
             task = "text-generation"
             self._mode = "causal"
 
-        # Pipeline (we pass batch_size at call-time to ensure it's used)
-        self._pipe = pipeline(task, model=model, tokenizer=self._tokenizer, device=device_id)
+        # Pipeline:
+        # - If `device_map="auto"` was used, the model is managed by accelerate and cannot be moved
+        #   via the pipeline `device=` argument.
+        # - Only pass `device=` when we did NOT use accelerate placement.
+        pipe_kwargs: Dict[str, Any] = {"model": model, "tokenizer": self._tokenizer}
+        if device_map is None:
+            pipe_kwargs["device"] = device_id
+        self._pipe = pipeline(task, **pipe_kwargs)
 
     def translate_batch(self, texts: List[str], source_lang_id: str, target_lang_id: str) -> List[str]:
         if not texts:
