@@ -13,13 +13,14 @@
 # ///
 
 import os
+import inspect
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 from datasets import Dataset, DatasetDict, load_dataset
 from huggingface_hub import HfFolder, login
-from peft import LoraConfig, TaskType, get_peft_model
+from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -142,6 +143,31 @@ def _resolve_hf_token() -> str:
     return hf_token
 
 
+def _make_training_arguments(**kwargs: Any) -> TrainingArguments:
+    """
+    Compatibility wrapper across transformers versions.
+
+    - `evaluation_strategy` was renamed to `eval_strategy` in newer versions.
+    - We only pass kwargs that exist in the installed `TrainingArguments` signature.
+    """
+    sig = inspect.signature(TrainingArguments.__init__)
+    accepted = set(sig.parameters.keys())
+
+    # Handle renamed fields
+    if "evaluation_strategy" in kwargs and "evaluation_strategy" not in accepted:
+        if "eval_strategy" in accepted and "eval_strategy" not in kwargs:
+            kwargs["eval_strategy"] = kwargs.pop("evaluation_strategy")
+        else:
+            kwargs.pop("evaluation_strategy", None)
+
+    # If both are present, prefer the one supported by this version.
+    if "eval_strategy" in kwargs and "eval_strategy" not in accepted:
+        kwargs.pop("eval_strategy", None)
+
+    filtered = {k: v for k, v in kwargs.items() if k in accepted}
+    return TrainingArguments(**filtered)
+
+
 def _load_and_split_dataset(*, hf_token: str) -> tuple[Dataset, Dataset]:
     ds_dict: DatasetDict = load_dataset(
         DATASET_ID,
@@ -242,7 +268,7 @@ def _train_one(
         pad_to_multiple_of=8,
     )
 
-    train_args = TrainingArguments(
+    train_args = _make_training_arguments(
         output_dir=run_dir,
         per_device_train_batch_size=PER_DEVICE_TRAIN_BATCH_SIZE,
         per_device_eval_batch_size=PER_DEVICE_EVAL_BATCH_SIZE,
@@ -355,27 +381,15 @@ def main() -> None:
 
     # 只推送最优 run
     if PUSH_BEST_TO_HUB:
-        # 重新加载一份模型（防止上面循环已释放），并从 best_run_dir 直接 push
-        model = AutoModelForCausalLM.from_pretrained(
+        # 重新加载 base model + best adapter（确保 push 的就是 best）
+        base_model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
             low_cpu_mem_usage=True,
             token=hf_token,
         )
-        peft_cfg = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            r=best_cfg.lora_r,
-            lora_alpha=best_cfg.lora_alpha,
-            lora_dropout=best_cfg.lora_dropout,
-            target_modules=TARGET_MODULES,
-            bias="none",
-        )
-        model = get_peft_model(model, peft_cfg)
+        model = PeftModel.from_pretrained(base_model, best["run_dir"])
 
-        # 将 best_run_dir 保存的 adapter 权重加载回来（确保 push 的就是 best）
-        # 注意：PEFT 会从目录里读取 adapter_config.json & adapter_model.safetensors
-        model.load_adapter(best["run_dir"])
-
-        train_args = TrainingArguments(
+        train_args = _make_training_arguments(
             output_dir=best["run_dir"],
             per_device_train_batch_size=PER_DEVICE_TRAIN_BATCH_SIZE,
             per_device_eval_batch_size=PER_DEVICE_EVAL_BATCH_SIZE,
