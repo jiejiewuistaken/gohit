@@ -54,10 +54,6 @@ TRUST_REMOTE_CODE = False
 ENABLE_BGE_M3_SIMILARITY = True
 BGE_M3_MODEL_ID = "BAAI/bge-m3"
 
-ENABLE_ADA_SIMILARITY = True
-# Modern OpenAI embedding model; kept metric name "ada_similarity" for compatibility.
-OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
-
 # Prompt template for CausalLM (if chat_template isn't used/available)
 PROMPT_TEMPLATE: Optional[str] = (
     "Translate the following text from {source_lang} to {target_lang}. "
@@ -142,50 +138,6 @@ class CompositeTextSimilarity:
         emb_ref = np.asarray(emb_ref, dtype="float32")
         emb_pred = np.asarray(emb_pred, dtype="float32")
         sims = (emb_ref * emb_pred).sum(axis=1)
-        return [float(x) for x in sims.tolist()]
-
-    def compute_ada_similarity(self, ground_truth: List[str], predictions: List[str]) -> List[float]:
-        """
-        Cosine similarity between OpenAI embedding vectors.
-
-        Requires environment variable OPENAI_API_KEY.
-        """
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            ERR("ada_similarity requires OPENAI_API_KEY in the environment.")
-
-        try:
-            import numpy as np  # type: ignore
-            from openai import OpenAI  # type: ignore
-        except Exception as e:
-            ERR(f"ada_similarity requires 'openai' and 'numpy'. Install them. Original error: {e}")
-
-        if len(ground_truth) != len(predictions):
-            ERR("ada_similarity: ground_truth and predictions length mismatch.")
-
-        client = OpenAI(api_key=api_key)
-
-        # Batch to reduce API calls; OpenAI embeddings API accepts list inputs.
-        def _embed(texts: List[str]) -> "np.ndarray":
-            resp = client.embeddings.create(model=OPENAI_EMBEDDING_MODEL, input=texts)
-            vecs = [d.embedding for d in resp.data]
-            arr = np.asarray(vecs, dtype="float32")
-            # Normalize rows
-            norms = np.linalg.norm(arr, axis=1, keepdims=True)
-            norms[norms == 0] = 1.0
-            return arr / norms
-
-        # Avoid huge requests; keep chunk size modest.
-        chunk = 128
-        ref_parts = []
-        pred_parts = []
-        for i in range(0, len(ground_truth), chunk):
-            ref_parts.append(_embed(ground_truth[i : i + chunk]))
-            pred_parts.append(_embed(predictions[i : i + chunk]))
-
-        ref = np.concatenate(ref_parts, axis=0)
-        pred = np.concatenate(pred_parts, axis=0)
-        sims = (ref * pred).sum(axis=1)
         return [float(x) for x in sims.tolist()]
 
     def compute_bleu_score(self, ground_truth: List[str], predictions: List[str]) -> List[float]:
@@ -488,7 +440,6 @@ class LanguageTranslationServiceConfig:
             "meteor": self.metric_assigner.compute_meteor_score,
             # Optional embedding metrics (enabled via top-level flags)
             "bge_m3_similarity": self.metric_assigner.compute_bge_m3_similarity,
-            "ada_similarity": self.metric_assigner.compute_ada_similarity,
         }
         self.connector = connector
 
@@ -518,7 +469,7 @@ class LanguageTranslationServiceConfig:
         self,
         context_data: pd.DataFrame,
         predictions: List[str],
-        criteria: List[str] = ["rouge", "bleu", "meteor", "bge_m3_similarity", "ada_similarity"],
+        criteria: List[str] = ["rouge", "bleu", "meteor", "bge_m3_similarity"],
     ) -> Tuple[List[str], Dict[str, List[float]], Dict[str, float]]:
         validations: Dict[str, List[float]] = defaultdict(list)
         gt = context_data["ground_truth_answer"].astype(str).tolist()
@@ -527,8 +478,6 @@ class LanguageTranslationServiceConfig:
             if criterion not in self.metrics:
                 raise ValueError(f"Unsupported criterion: {criterion}")
             if criterion == "bge_m3_similarity" and not ENABLE_BGE_M3_SIMILARITY:
-                continue
-            if criterion == "ada_similarity" and not ENABLE_ADA_SIMILARITY:
                 continue
             validations[criterion] = self.metrics[criterion](ground_truth=gt, predictions=predictions)
 
