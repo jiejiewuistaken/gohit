@@ -1,104 +1,233 @@
 import os
-from typing import Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import gradio as gr
 import torch
 from huggingface_hub import login
-from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 # ----------------------------
 # Config (edit in Space Variables/Secrets)
 # ----------------------------
 
+# Base model (for gated models like Llama, Space needs HF_TOKEN in Secrets)
 BASE_MODEL_ID = os.environ.get("BASE_MODEL_ID", "meta-llama/Llama-3.1-8B-Instruct")
-# Your LoRA adapter repo (contains adapter weights + tokenizer if you pushed it)
+
+# LoRA adapter-only repo (your fine-tuned adapter)
 ADAPTER_REPO_ID = os.environ.get(
     "ADAPTER_REPO_ID", "ifadaiml/Llama-3.1-8B-Instruct-IFAD-mt-en-es-v0.2"
 )
 
-# If BASE_MODEL_ID is gated (e.g. Llama), set this in Space Secrets
+# In Space Secrets if base model is gated / adapter repo is private
 HF_TOKEN = (
     os.environ.get("HF_TOKEN")
     or os.environ.get("HUGGINGFACEHUB_API_TOKEN")
     or os.environ.get("HUGGINGFACE_HUB_TOKEN")
 )
 
+# Match the evaluation script behavior (prompt + chat template usage)
+USE_CHAT_TEMPLATE = True
+TRUST_REMOTE_CODE = False
 
-LANGS = {
-    "English": "English",
-    "Spanish": "Spanish",
-    "Chinese": "Chinese",
-    "Japanese": "Japanese",
-    "French": "French",
-    "German": "German",
-    "Korean": "Korean",
+CODE2LANGUAGE = {
+    "en": "English",
+    "fr": "French",
+    "es": "Spanish",
+    "ar": "Arabic",
+    "pt": "Portuguese",
+    "zh": "Chinese Simplified",
 }
 
+LANG_CODE_CHOICES = list(CODE2LANGUAGE.keys())
 
-def build_prompt(src_lang: str, tgt_lang: str, text: str) -> str:
-    src = LANGS.get(src_lang, src_lang)
-    tgt = LANGS.get(tgt_lang, tgt_lang)
-    return f"Translate {src} to {tgt}.\n\n{src}: {text.strip()}\n{tgt}:"
-
-
-def _pick_dtype() -> torch.dtype:
-    # Prefer bf16 on modern GPUs; fallback to fp16; CPU uses float32.
-    if torch.cuda.is_available():
-        if torch.cuda.get_device_capability(0)[0] >= 8:  # Ampere+
-            return torch.bfloat16
-        return torch.float16
-    return torch.float32
+PROMPT_TEMPLATE: Optional[str] = (
+    "Translate the following text from {source_lang} to {target_lang}. "
+    "Output ONLY the translated text.\n\n"
+    "Text:\n{text}\n\n"
+    "Translation:"
+)
 
 
-def load_models() -> tuple[PeftModel, AutoTokenizer]:
-    if HF_TOKEN:
-        # Works for both gated base models and private adapter repos.
-        login(token=HF_TOKEN, add_to_git_credential=False)
-
-    dtype = _pick_dtype()
-    device_map = "auto" if torch.cuda.is_available() else None
-
-    base = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL_ID,
-        token=HF_TOKEN,
-        torch_dtype=dtype,
-        device_map=device_map,
-        low_cpu_mem_usage=True,
-    )
-    # Important for generation speed/memory in training, but harmless here.
-    if getattr(base.config, "use_cache", None) is True:
-        base.config.use_cache = True
-
-    # Tokenizer: prefer adapter repo if it contains tokenizer; else fall back to base.
-    try:
-        tok = AutoTokenizer.from_pretrained(ADAPTER_REPO_ID, token=HF_TOKEN, use_fast=True)
-    except Exception:
-        tok = AutoTokenizer.from_pretrained(BASE_MODEL_ID, token=HF_TOKEN, use_fast=True)
-    if tok.pad_token_id is None:
-        tok.pad_token = tok.eos_token
-
-    ft = PeftModel.from_pretrained(base, ADAPTER_REPO_ID, token=HF_TOKEN)
-    ft.eval()
-    return ft, tok
+def _maybe_strip(text: str) -> str:
+    return text.strip().strip('"').strip()
 
 
-_FT_MODEL = None
-_TOKENIZER = None
+def _first_generated_dict(x: Any) -> Dict[str, Any]:
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, list) and x:
+        return _first_generated_dict(x[0])
+    return {}
 
 
-def get_models():
-    global _FT_MODEL, _TOKENIZER
-    if _FT_MODEL is None or _TOKENIZER is None:
-        _FT_MODEL, _TOKENIZER = load_models()
-    return _FT_MODEL, _TOKENIZER
+class HuggingFaceHubTranslationConnector:
+    """
+    Same idea as your testPlan connector, but:
+    - Loads adapter ONCE (base weights only once)
+    - Produces both base and finetuned outputs via `adapter_enabled` switch
+      using `with model.disable_adapter(): ...` around the pipeline call.
+    """
+
+    def __init__(
+        self,
+        *,
+        hf_token: str,
+        base_model_id: str,
+        adapter_model_id: str,
+        prompt_template: Optional[str] = None,
+        use_chat_template: bool = True,
+        trust_remote_code: bool = False,
+    ) -> None:
+        from transformers import (  # type: ignore
+            AutoModelForCausalLM,
+            AutoTokenizer,
+            pipeline,
+        )
+        from peft import PeftModel  # type: ignore
+
+        self.hf_token = hf_token
+        self.base_model_id = base_model_id
+        self.adapter_model_id = adapter_model_id
+        self.prompt_template = prompt_template
+        self.use_chat_template = use_chat_template
+        self.trust_remote_code = trust_remote_code
+
+        use_cuda = torch.cuda.is_available()
+        device_map = "auto" if use_cuda else None
+        torch_dtype = "auto" if use_cuda else None
+
+        # Tokenizer: try adapter first (if it contains tokenizer), else base.
+        try:
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                adapter_model_id,
+                use_fast=True,
+                trust_remote_code=trust_remote_code,
+                token=hf_token,
+            )
+        except Exception:
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                base_model_id,
+                use_fast=True,
+                trust_remote_code=trust_remote_code,
+                token=hf_token,
+            )
+
+        # Decoder-only models: left padding for better batching correctness
+        try:
+            self._tokenizer.padding_side = "left"
+        except Exception:
+            pass
+
+        if getattr(self._tokenizer, "pad_token_id", None) is None and getattr(
+            self._tokenizer, "eos_token_id", None
+        ) is not None:
+            self._tokenizer.pad_token = self._tokenizer.eos_token
+
+        base = AutoModelForCausalLM.from_pretrained(
+            base_model_id,
+            trust_remote_code=trust_remote_code,
+            token=hf_token,
+            device_map=device_map,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+        )
+        self._model = PeftModel.from_pretrained(base, adapter_model_id, token=hf_token)
+        self._model.eval()
+
+        pipe_kwargs: Dict[str, Any] = {"model": self._model, "tokenizer": self._tokenizer}
+        self._pipe = pipeline("text-generation", **pipe_kwargs)
+
+    def _build_prompts(self, texts: List[str], source_lang_id: str, target_lang_id: str) -> List[str]:
+        source_lang = CODE2LANGUAGE.get(source_lang_id, source_lang_id)
+        target_lang = CODE2LANGUAGE.get(target_lang_id, target_lang_id)
+        prompt_template = self.prompt_template or (
+            "Translate the following text from {source_lang} to {target_lang}. "
+            "Return only the translation.\n\nText:\n{text}\n\nTranslation:"
+        )
+
+        prompts: List[str] = []
+        if (
+            self.use_chat_template
+            and hasattr(self._tokenizer, "apply_chat_template")
+            and getattr(self._tokenizer, "chat_template", None)
+        ):
+            for t in texts:
+                messages = [
+                    {"role": "system", "content": "You are a professional translation system."},
+                    {
+                        "role": "user",
+                        "content": prompt_template.format(
+                            source_lang=source_lang, target_lang=target_lang, text=t
+                        ),
+                    },
+                ]
+                prompts.append(
+                    self._tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
+                    )
+                )
+        else:
+            for t in texts:
+                prompts.append(
+                    prompt_template.format(source_lang=source_lang, target_lang=target_lang, text=t)
+                )
+        return prompts
+
+    @torch.inference_mode()
+    def translate_one(
+        self,
+        *,
+        text: str,
+        source_lang_id: str,
+        target_lang_id: str,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        adapter_enabled: bool,
+    ) -> str:
+        prompts = self._build_prompts([text], source_lang_id, target_lang_id)
+        gen_kwargs = dict(
+            max_new_tokens=int(max_new_tokens),
+            do_sample=float(temperature) > 0,
+            temperature=float(temperature),
+            top_p=float(top_p),
+            return_full_text=False,
+            batch_size=1,
+        )
+
+        if adapter_enabled:
+            outs = self._pipe(prompts, **gen_kwargs)
+        else:
+            # Base output: run the same pipeline, but with adapter disabled.
+            with self._model.disable_adapter():
+                outs = self._pipe(prompts, **gen_kwargs)
+
+        d = _first_generated_dict(outs)
+        return _maybe_strip(str(d.get("generated_text", "")))
 
 
-@torch.inference_mode()
+_CONNECTOR: Optional[HuggingFaceHubTranslationConnector] = None
+
+
+def get_connector() -> HuggingFaceHubTranslationConnector:
+    global _CONNECTOR
+    if _CONNECTOR is None:
+        if HF_TOKEN:
+            login(token=HF_TOKEN, add_to_git_credential=False)
+        _CONNECTOR = HuggingFaceHubTranslationConnector(
+            hf_token=HF_TOKEN or "",
+            base_model_id=BASE_MODEL_ID,
+            adapter_model_id=ADAPTER_REPO_ID,
+            prompt_template=PROMPT_TEMPLATE,
+            use_chat_template=USE_CHAT_TEMPLATE,
+            trust_remote_code=TRUST_REMOTE_CODE,
+        )
+    return _CONNECTOR
+
+
 def generate_translation(
-    src_lang: str,
-    tgt_lang: str,
+    src_code: str,
+    tgt_code: str,
     text: str,
     max_new_tokens: int,
     temperature: float,
@@ -107,40 +236,26 @@ def generate_translation(
     if not text or not text.strip():
         return "", ""
 
-    model, tok = get_models()
-    prompt = build_prompt(src_lang, tgt_lang, text)
-
-    inputs = tok(prompt, return_tensors="pt")
-    if torch.cuda.is_available():
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
-
-    gen_kwargs = dict(
-        max_new_tokens=int(max_new_tokens),
-        do_sample=float(temperature) > 0,
-        temperature=float(temperature),
-        top_p=float(top_p),
-        eos_token_id=tok.eos_token_id,
-        pad_token_id=tok.pad_token_id,
+    c = get_connector()
+    base_out = c.translate_one(
+        text=text,
+        source_lang_id=src_code,
+        target_lang_id=tgt_code,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        adapter_enabled=False,
     )
-
-    # Fine-tuned output (with adapter)
-    out_ft = model.generate(**inputs, **gen_kwargs)
-    ft_text = tok.decode(out_ft[0], skip_special_tokens=True)
-
-    # Base output (same underlying base model, but adapter disabled)
-    try:
-        with model.disable_adapter():
-            out_base = model.generate(**inputs, **gen_kwargs)
-    except Exception:
-        # Fallback if peft version doesn't support disable_adapter()
-        out_base = model.base_model.generate(**inputs, **gen_kwargs)
-    base_text = tok.decode(out_base[0], skip_special_tokens=True)
-
-    # Return only the completion after the prompt (best-effort)
-    def strip_prompt(full: str) -> str:
-        return full[len(prompt) :].strip() if full.startswith(prompt) else full.strip()
-
-    return strip_prompt(base_text), strip_prompt(ft_text)
+    ft_out = c.translate_one(
+        text=text,
+        source_lang_id=src_code,
+        target_lang_id=tgt_code,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        adapter_enabled=True,
+    )
+    return base_out, ft_out
 
 
 def swap_langs(src: str, tgt: str) -> tuple[str, str]:
@@ -157,8 +272,8 @@ def build_demo() -> gr.Blocks:
         )
 
         with gr.Row():
-            src_lang = gr.Dropdown(choices=list(LANGS.keys()), value="English", label="From")
-            tgt_lang = gr.Dropdown(choices=list(LANGS.keys()), value="Spanish", label="To")
+            src_lang = gr.Dropdown(choices=LANG_CODE_CHOICES, value="en", label="From (lang code)")
+            tgt_lang = gr.Dropdown(choices=LANG_CODE_CHOICES, value="es", label="To (lang code)")
             switch = gr.Button("Switch")
 
         switch.click(fn=swap_langs, inputs=[src_lang, tgt_lang], outputs=[src_lang, tgt_lang])
