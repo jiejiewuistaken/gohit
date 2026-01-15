@@ -60,6 +60,64 @@ def _first_generated_dict(x: Any) -> Dict[str, Any]:
     return {}
 
 
+def _extract_translation_only(raw: str, *, target_lang_id: str) -> str:
+    """
+    Best-effort post-processing to return ONLY the translation.
+
+    Even with `return_full_text=False`, some models may:
+    - echo parts of the prompt
+    - include labels like "Translation:" / "Spanish:" / etc.
+    - add extra commentary
+    """
+    s = _maybe_strip(raw)
+    if not s:
+        return ""
+
+    # Remove common assistant prefixes
+    for p in ("Assistant:", "assistant:", "### Assistant:", "Response:", "### Response:"):
+        if s.startswith(p):
+            s = s[len(p) :].strip()
+            break
+
+    target_name = CODE2LANGUAGE.get(target_lang_id, target_lang_id)
+    markers = [
+        "Translation:",
+        f"{target_name}:",
+        f"{target_lang_id}:",
+    ]
+    for m in markers:
+        if m in s:
+            s = s.split(m)[-1].strip()
+
+    # Stop if it starts a new section again.
+    stop_prefixes = (
+        "Text:",
+        "Source:",
+        "English:",
+        "Spanish:",
+        "French:",
+        "Chinese",
+        "User:",
+        "System:",
+        "Question:",
+        "Input:",
+    )
+
+    lines = [ln.strip() for ln in s.splitlines()]
+    kept: List[str] = []
+    for ln in lines:
+        if not ln:
+            continue
+        if kept and ln.startswith(stop_prefixes):
+            break
+        if not kept and ln.startswith(stop_prefixes):
+            continue
+        kept.append(ln)
+
+    s = "\n".join(kept).strip() if kept else s.strip()
+    return _maybe_strip(s)
+
+
 class HuggingFaceHubTranslationConnector:
     """
     Same idea as your testPlan connector, but:
@@ -193,6 +251,8 @@ class HuggingFaceHubTranslationConnector:
             top_p=float(top_p),
             return_full_text=False,
             batch_size=1,
+            eos_token_id=getattr(self._tokenizer, "eos_token_id", None),
+            pad_token_id=getattr(self._tokenizer, "pad_token_id", None),
         )
 
         if adapter_enabled:
@@ -203,7 +263,8 @@ class HuggingFaceHubTranslationConnector:
                 outs = self._pipe(prompts, **gen_kwargs)
 
         d = _first_generated_dict(outs)
-        return _maybe_strip(str(d.get("generated_text", "")))
+        raw = _maybe_strip(str(d.get("generated_text", "")))
+        return _extract_translation_only(raw, target_lang_id=target_lang_id)
 
 
 _CONNECTOR: Optional[HuggingFaceHubTranslationConnector] = None
